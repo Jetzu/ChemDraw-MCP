@@ -32,6 +32,11 @@ Restart ChemDraw after installing: add-ins and scripts are read at launch.
   slash suggestion.
 * `/model` – provider · model · effort chooser (also the button bottom right); `/claude`, `/codex` – switch provider;
   `/clear` – new conversation; `/stop` – interrupt; `/skills` – ask the agent to list its skills; `/help`.
+* The model and effort menus are read from the CLIs' own model caches (Claude Code: `~/.claude/cache/model-catalog/`,
+  Codex: `~/.codex/models_cache.json`), which the CLIs refresh themselves, so new models appear without an update.
+  Claude models are offered by alias (`opus`, `sonnet`, ...), which always means the newest model of that family; a
+  saved model that has been superseded or no longer exists is switched to its current equivalent on the next run (the
+  chat shows a note).
 * The header dot shows the bridge state. Red means the bridge is not running: use **Scripts ▸ Start Agent Bridge** or run
   `chemdraw-agent-bridge` (`--check` lists the CLIs it found).
 * "selection attached" means the SMILES of your current selection was sent with the prompt.
@@ -45,7 +50,8 @@ Restart ChemDraw after installing: add-ins and scripts are read at launch.
 * Requests carrying an `http(s)` `Origin` other than localhost are refused, so a web page cannot drive the bridge even
   if it guessed the port.
 * Claude runs with `--allowedTools mcp__chemdraw` (plus `Bash,Edit,Write` only when a run is started with
-  `allow_shell`); Codex runs with `--approve-for-me`.
+  `allow_shell`); Codex runs with `-c approvals_reviewer="auto_review" -c approval_policy="on-request"
+  -c sandbox_mode="workspace-write"` (what `--approve-for-me` sets; that flag is not accepted by `codex exec resume`).
 
 ## Environment variables
 

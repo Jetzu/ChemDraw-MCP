@@ -229,8 +229,11 @@ def test_app_js_contract_strings():
         assert kind in js, kind
     for cmd in ("/model", "/clear", "/claude", "/codex", "/stop", "/help", "/skills"):
         assert "'%s'" % cmd in js, cmd
-    for model in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "gpt-6-sol", "gpt-6"):
-        assert model in js, model
+    # model menus come from the bridge (the CLIs' own model caches); the fallback offers Claude's aliases
+    assert "model_options" in js and "model_efforts" in js and "'note'" in js
+    for alias in ("'opus'", "'sonnet'", "'haiku'", "'fable'"):
+        assert alias in js, alias
+    assert "claude-opus-5-5" not in js and "gpt-6-sol" not in js   # no pinned versions that go stale
 
 
 def test_app_js_feature_detects_chemdraw_api():

@@ -100,6 +100,9 @@ def home(tmp_path, monkeypatch):
               "CODEX_CLI", "CHEMDRAWMCP_BRIDGE_CWD", "FAKE_CLI_SLEEP", "FAKE_CLI_FAIL"):
         monkeypatch.delenv(v, raising=False)
     monkeypatch.setenv("FAKE_CLI_ARGV", str(tmp_path / "argv.json"))
+    # no model caches of the real CLIs: the built-in fallback menus apply (catalog tests write their own)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     return h
 
 
@@ -318,7 +321,8 @@ def test_codex_run_stream(bridge, fakes, home):
     assert events[8][1]["status"] == "done" and events[8][1]["final_text"] == "ChemDraw is running."
     assert call(bridge, "GET", "/sessions")[1]["codex"] == "thr-1"
     argv = argv_of(fakes)
-    assert argv[:4] == ["exec", "--json", "--approve-for-me", "--skip-git-repo-check"]
+    assert argv[:2] == ["exec", "--json"] and "--skip-git-repo-check" in argv
+    assert "--approve-for-me" not in argv and 'approvals_reviewer="auto_review"' in argv
     if sys.platform.startswith("win"):
         assert argv[-1]   # cmd.exe mangles the multi-line prompt handed to the .cmd stand-in
     else:
@@ -328,6 +332,8 @@ def test_codex_run_stream(bridge, fakes, home):
     assert resp2["session_id"] == "thr-1" and ev2[0][1] == "thr-1"
     argv = argv_of(fakes)
     assert argv[:2] == ["exec", "resume"] and argv[-2] == "thr-1"
+    # `codex exec resume` has no --approve-for-me flag (follow-up turns used to fail); the -c overrides work on both
+    assert "--approve-for-me" not in argv and 'sandbox_mode="workspace-write"' in argv
     if not sys.platform.startswith("win"):
         assert "Agent Chat" not in argv[-1] and "front doc: Untitled-1" in argv[-1] and argv[-1].endswith("User request: again")
     hist = call(bridge, "GET", "/history?backend=codex")[1]
@@ -498,3 +504,94 @@ def test_main_check_and_parse(fakes, capsys):
     assert server.main(["--check"]) == 0
     out = capsys.readouterr().out
     assert fakes["claude"] in out and fakes["codex"] in out and "default: claude" in out
+
+
+# ---------------------------------------------------------------------------
+# model catalog (menus follow the CLIs' own model caches)
+# ---------------------------------------------------------------------------
+
+def write_catalogs(tmp_path, claude_models, aliases, codex_models, codex_default="gpt-b"):
+    cat = tmp_path / "claude-config" / "cache" / "model-catalog"
+    cat.mkdir(parents=True, exist_ok=True)
+    (cat / "org-old-cc.json").write_text(json.dumps({"fetchedAt": 1, "catalog": {"config": {"models": [
+        {"id": "claude-stale-1", "name": "Stale", "section": "main", "runtime": {"family": "opus"}}]}}}))
+    (cat / "org-new-cc.json").write_text(json.dumps({"fetchedAt": 2, "catalog": {"config": {
+        "models": claude_models, "provider_alias_targets": {a: {"default": t} for a, t in aliases.items()}}}}))
+    (cat / "masked-ids.json").write_text(json.dumps({"ids": ["claude-secret-1"]}))
+    codex = tmp_path / "codex-home"
+    codex.mkdir(exist_ok=True)
+    (codex / "models_cache.json").write_text(json.dumps({"models": codex_models}))
+    (codex / "config.toml").write_text('model = "%s"\n\n[projects."/x"]\nmodel = "nope"\n' % codex_default)
+
+
+def cmodel(mid, family, section="main", efforts=("low", "medium", "high")):
+    return {"id": mid, "name": mid.replace("claude-", "").title(), "section": section,
+            "runtime": {"family": family, "effort_levels": list(efforts), "default_effort": "medium"}}
+
+
+def xmodel(slug, prio, visibility="list", efforts=("low", "medium", "high")):
+    return {"slug": slug, "display_name": slug.upper(), "visibility": visibility, "priority": prio,
+            "supported_reasoning_levels": [{"effort": e} for e in efforts], "default_reasoning_level": "medium"}
+
+
+@pytest.fixture
+def catalogs(tmp_path, home):
+    write_catalogs(
+        tmp_path,
+        [cmodel("claude-opus-9", "opus", efforts=("low", "medium", "high", "max")), cmodel("claude-sonnet-9", "sonnet"),
+         cmodel("claude-opus-8", "opus", section="overflow"), cmodel("claude-secret-1", "secret")],
+        {"opus": "claude-opus-9", "sonnet": "claude-sonnet-9"},
+        [xmodel("gpt-b", 2), xmodel("gpt-a", 1, efforts=("low", "medium", "high", "ultra")),
+         xmodel("gpt-hidden", 3, visibility="hide")])
+    cfg._catalog_memo.clear()
+    yield tmp_path
+    cfg._catalog_memo.clear()
+
+
+def test_catalog_fallback_without_caches(home):
+    cfg._catalog_memo.clear()
+    assert [v for v, _ in cfg.model_choices("claude")] == ["", "fable", "opus", "sonnet", "haiku"]
+    assert cfg.model_choices("codex") == [("", "default (config.toml)")]
+    assert cfg.effort_choices("codex") == cfg.EFFORT_CHOICES["codex"]
+    assert cfg.resolve_model("codex", "anything") == ("anything", "")   # nothing to check against: keep it
+
+
+def test_catalog_menus_follow_cli_caches(catalogs):
+    assert cfg.model_choices("claude") == [("", "default"), ("opus", "opus · Opus-9"), ("sonnet", "sonnet · Sonnet-9")]
+    assert cfg.model_choices("codex") == [("", "default (gpt-b)"), ("gpt-a", "gpt-a"), ("gpt-b", "gpt-b")]
+    assert cfg.effort_choices("claude", "opus") == ["", "low", "medium", "high", "max"]
+    assert cfg.effort_choices("codex") == ["", "low", "medium", "high", "ultra"]
+    assert cfg.effort_choices("codex", "") == ["", "low", "medium", "high"]      # config.toml default = gpt-b
+    snap = cfg.settings_snapshot()
+    assert snap["model_options"]["claude"][1] == ["opus", "opus · Opus-9"]
+    assert snap["model_efforts"]["codex"]["gpt-a"][-1] == "ultra"
+    # a new release lands in the cache -> the menu follows without any code change
+    write_catalogs(catalogs, [cmodel("claude-opus-10", "opus"), cmodel("claude-opus-9", "opus", section="overflow")],
+                   {"opus": "claude-opus-10"}, [xmodel("gpt-c", 1)])
+    os.utime(catalogs / "claude-config" / "cache" / "model-catalog" / "org-new-cc.json", (10 ** 9 + 5, 10 ** 9 + 5))
+    os.utime(catalogs / "codex-home" / "models_cache.json", (10 ** 9 + 5, 10 ** 9 + 5))
+    assert cfg.model_choices("claude") == [("", "default"), ("opus", "opus · Opus-10")]
+    assert [v for v, _ in cfg.model_choices("codex")] == ["", "gpt-c"]
+
+
+def test_catalog_heals_superseded_models(catalogs):
+    assert cfg.resolve_model("claude", "opus") == ("opus", "")
+    assert cfg.resolve_model("claude", "claude-sonnet-9") == ("claude-sonnet-9", "")
+    new, note = cfg.resolve_model("claude", "claude-opus-8[1m]")       # in the catalog, but no longer offered
+    assert new == "opus[1m]" and "superseded" in note
+    assert cfg.resolve_model("claude", "claude-opus-7")[0] == "opus"   # gone entirely
+    assert cfg.resolve_model("claude", "opusplan") == ("opusplan", "")  # unknown names pass through
+    assert cfg.resolve_model("codex", "gpt-hidden") == ("gpt-hidden", "")
+    assert cfg.resolve_model("codex", "gpt-6")[0] == ""
+    assert cfg.resolve_effort("claude", "sonnet", "max")[0] == ""
+    assert cfg.resolve_effort("claude", "opus", "max") == ("max", "")
+
+
+def test_run_heals_saved_model_and_reports_it(bridge, fakes, catalogs, home):
+    cfg.set_backend_settings("codex", model="gpt-6", effort="ultra")
+    _, events = run_to_end(bridge, {"backend": "codex", "prompt": "hi"})
+    argv = argv_of(fakes)
+    assert "-m" not in argv and not any("model_reasoning_effort" in a for a in argv)
+    notes = [p for k, p, _ in events if k == "note"]
+    assert len(notes) == 2 and "gpt-6" in notes[0]
+    assert cfg.backend_settings("codex") == {"model": "", "effort": ""}   # remembered: healed once

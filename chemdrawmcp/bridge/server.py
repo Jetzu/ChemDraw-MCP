@@ -169,8 +169,8 @@ class Bridge:
             raise BridgeError(400, "model/effort need a backend")
         if effort is not None:
             effort = str(effort)
-            if effort not in cfg.EFFORT_CHOICES[backend]:
-                raise BridgeError(400, "effort for %s must be one of %s" % (backend, cfg.EFFORT_CHOICES[backend]))
+            if effort not in cfg.effort_choices(backend):
+                raise BridgeError(400, "effort for %s must be one of %s" % (backend, cfg.effort_choices(backend)))
         if model is not None:
             model = str(model)
         if backend is not None and (model is not None or effort is not None):
@@ -210,8 +210,8 @@ class Bridge:
             session_id = self.store.get_session(backend)
         model = body.get("model")
         effort = body.get("effort")
-        if effort is not None and str(effort) not in cfg.EFFORT_CHOICES[backend]:
-            raise BridgeError(400, "effort for %s must be one of %s" % (backend, cfg.EFFORT_CHOICES[backend]))
+        if effort is not None and str(effort) not in cfg.effort_choices(backend):
+            raise BridgeError(400, "effort for %s must be one of %s" % (backend, cfg.effort_choices(backend)))
         context = body.get("context")
         if context is not None and not isinstance(context, str):
             context = json.dumps(context)

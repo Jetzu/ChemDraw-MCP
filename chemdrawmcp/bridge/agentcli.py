@@ -11,6 +11,7 @@ Events delivered to the callback as (kind, payload):
     ("text", str)            complete assistant message
     ("tool", str)            tool call: "<server>/<tool> <json args>"
     ("tool_result", str)     tool result text (truncated)
+    ("note", str)            bridge remark (e.g. a saved model that was replaced by its current equivalent)
     ("stats", dict)          cost/usage at the end of a turn
     ("done", str)            final answer (also delivered as text)
     ("error", str)
@@ -26,8 +27,9 @@ import sys
 import threading
 from typing import Callable, List, Optional
 
-from .settings import (BACKENDS, BACKEND_LABELS, EFFORT_CHOICES, MODEL_CHOICES, backend_settings,  # noqa: F401
-                       home_dir, load_settings, save_settings, set_backend_settings, set_default_backend,
+from .settings import (BACKENDS, BACKEND_LABELS, CODEX_APPROVAL_ARGS, EFFORT_CHOICES, MODEL_CHOICES,  # noqa: F401
+                       backend_settings, effort_choices, home_dir, load_settings, model_choices, resolve_effort,
+                       resolve_model, save_settings, set_backend_settings, set_default_backend,
                        stored_default_backend, workspace_dir)
 
 APP = "chemdraw"
@@ -205,7 +207,7 @@ def build_argv(backend: str, exe: str, prompt: str, session_id: Optional[str] = 
                     str(extra_context).strip(), prompt)
         else:
             full_prompt = "%s\n\nUser request: %s" % (context, prompt)
-        opts = ["--json", "--approve-for-me", "--skip-git-repo-check"]
+        opts = ["--json"] + CODEX_APPROVAL_ARGS + ["--skip-git-repo-check"]
         if model:
             opts += ["-m", model]
         if effort:
@@ -337,6 +339,20 @@ class AgentRun:
         st = backend_settings(backend)
         self.model = st["model"] if model is None else model
         self.effort = st["effort"] if effort is None else effort
+        # a saved model/effort the CLI no longer offers -> the current equivalent (and remember it)
+        self.notes: List[str] = []
+        healed_model, note = resolve_model(backend, self.model)
+        if note:
+            self.notes.append(note)
+            if model is None:
+                set_backend_settings(backend, model=healed_model)
+        self.model = healed_model
+        healed_effort, note = resolve_effort(backend, self.model, self.effort)
+        if note:
+            self.notes.append(note)
+            if effort is None:
+                set_backend_settings(backend, effort=healed_effort)
+        self.effort = healed_effort
         self.prompt = prompt
         self.argv = build_argv(backend, self.exe, prompt, session_id, allow_shell, self.model, self.effort, extra_context)
         self.callback = callback
@@ -405,6 +421,8 @@ class AgentRun:
             return
         if self.cancelled:  # cancelled between construction and process start
             self.cancel()
+        for note in self.notes:
+            self._emit("note", note)
         parser = _parse_claude if self.backend == "claude" else _parse_codex
         err_lines = []
 
